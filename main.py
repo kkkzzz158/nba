@@ -1,4 +1,5 @@
 from telethon import TelegramClient, types
+from telethon.sessions import StringSession  # 👈 新增：支持字符串会话
 from telethon.tl.types import BotCommand
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from models.models import init_db
@@ -33,6 +34,7 @@ api_id = os.getenv('API_ID')
 api_hash = os.getenv('API_HASH')
 bot_token = os.getenv('BOT_TOKEN')
 phone_number = os.getenv('PHONE_NUMBER')
+session_str = os.getenv('SESSION_STRING')  # 👈 新增：读取 SESSION_STRING
 
 # 创建 DBOperations 实例
 db_ops = None
@@ -60,8 +62,15 @@ def clear_temp_dir():
         os.remove(os.path.join('./temp', file))
 
 
-# 创建客户端
-user_client = TelegramClient('./sessions/user', api_id, api_hash)
+# 初始化客户端：支持 SESSION_STRING 或 文件 session
+if session_str:
+    user_session = StringSession(session_str)
+    logger.info("ℹ️ 使用 SESSION_STRING 初始化用户客户端")
+else:
+    user_session = './sessions/user'
+    logger.info("ℹ️ 使用文件 session 初始化用户客户端")
+
+user_client = TelegramClient(user_session, api_id, api_hash)
 bot_client = TelegramClient('./sessions/bot', api_id, api_hash)
 
 # 初始化数据库
@@ -83,15 +92,29 @@ async def start_clients():
     db_ops = await DBOperations.create()
 
     try:
-        # 启动用户客户端
-        await user_client.start(phone=phone_number)
+        # 启动用户客户端 👇 核心修改：智能登录
+        if session_str:
+            await user_client.start()
+            logger.info("✅ 用户客户端已通过 SESSION_STRING 登录")
+            # 可选：备份当前 session（防止失效后丢失）
+            if isinstance(user_client.session, StringSession):
+                saved_session = user_client.session.save()
+                with open('./sessions/user.session_string', 'w') as f:
+                    f.write(saved_session)
+                logger.info("💾 SESSION_STRING 已备份到 ./sessions/user.session_string")
+        else:
+            if not phone_number:
+                raise ValueError("❌ 未提供 SESSION_STRING 或 PHONE_NUMBER，无法登录用户客户端！")
+            await user_client.start(phone=phone_number)
+            logger.info(f"✅ 用户客户端已通过手机号 {phone_number} 登录")
+
         me_user = await user_client.get_me()
-        print(f'用户客户端已启动: {me_user.first_name} (@{me_user.username})')
+        logger.info(f'👤 用户身份: {me_user.first_name} (@{me_user.username})')
 
         # 启动机器人客户端
         await bot_client.start(bot_token=bot_token)
         me_bot = await bot_client.get_me()
-        print(f'机器人客户端已启动: {me_bot.first_name} (@{me_bot.username})')
+        logger.info(f'🤖 机器人身份: {me_bot.first_name} (@{me_bot.username})')
 
         # 设置消息监听器
         await setup_listeners(user_client, bot_client)
@@ -112,7 +135,7 @@ async def start_clients():
             try:
                 rss_host = os.getenv('RSS_HOST', '0.0.0.0')
                 rss_port = int(os.getenv('RSS_PORT', '8000'))
-                logger.info(f"正在启动 RSS 服务 (host={rss_host}, port={rss_port})")
+                logger.info(f"📡 正在启动 RSS 服务 (host={rss_host}, port={rss_port})")
                 
                 # 在新进程中启动 RSS 服务
                 rss_process = multiprocessing.Process(
@@ -120,12 +143,12 @@ async def start_clients():
                     args=(rss_host, rss_port)
                 )
                 rss_process.start()
-                logger.info("RSS 服务启动成功")
+                logger.info("✅ RSS 服务启动成功")
             except Exception as e:
-                logger.error(f"启动 RSS 服务失败: {str(e)}")
+                logger.error(f"❌ 启动 RSS 服务失败: {str(e)}")
                 logger.exception(e)
         else:
-            logger.info("RSS 服务未启用")
+            logger.info("ℹ️ RSS 服务未启用")
 
         # 发送欢迎消息
         await send_welcome_message(bot_client)
@@ -153,188 +176,63 @@ async def start_clients():
 
 async def register_bot_commands(bot):
     """注册机器人命令"""
-    # # 先清空现有命令
-    # try:
-    #     await bot(SetBotCommandsRequest(
-    #         scope=types.BotCommandScopeDefault(),
-    #         lang_code='',
-    #         commands=[]  # 空列表清空所有命令
-    #     ))
-    #     logger.info('已清空现有机器人命令')
-    # except Exception as e:
-    #     logger.error(f'清空机器人命令时出错: {str(e)}')
-
     commands = [
         # 基础命令
-        BotCommand(
-            command='start',
-            description='开始使用'
-        ),
-        BotCommand(
-            command='help',
-            description='查看帮助'
-        ),
+        BotCommand(command='start', description='开始使用'),
+        BotCommand(command='help', description='查看帮助'),
         # 绑定和设置
-        BotCommand(
-            command='bind',
-            description='绑定源聊天'
-        ),
-        BotCommand(
-            command='settings',
-            description='管理转发规则'
-        ),
-        BotCommand(
-            command='switch',
-            description='切换当前需要设置的聊天规则'
-        ),
+        BotCommand(command='bind', description='绑定源聊天'),
+        BotCommand(command='settings', description='管理转发规则'),
+        BotCommand(command='switch', description='切换当前需要设置的聊天规则'),
         # 关键字管理
-        BotCommand(
-            command='add',
-            description='添加关键字'
-        ),
-        BotCommand(
-            command='add_regex',
-            description='添加正则关键字'
-        ),
-        BotCommand(
-            command='add_all',
-            description='添加普通关键字到所有规则'
-        ),
-        BotCommand(
-            command='add_regex_all',
-            description='添加正则表达式到所有规则'
-        ),
-        BotCommand(
-            command='list_keyword',
-            description='列出所有关键字'
-        ),
-        BotCommand(
-            command='remove_keyword',
-            description='删除关键字'
-        ),
-        BotCommand(
-            command='remove_keyword_by_id',
-            description='按ID删除关键字'
-        ),
-        BotCommand(
-            command='remove_all_keyword',
-            description='删除当前频道绑定的所有规则的指定关键字'
-        ),
+        BotCommand(command='add', description='添加关键字'),
+        BotCommand(command='add_regex', description='添加正则关键字'),
+        BotCommand(command='add_all', description='添加普通关键字到所有规则'),
+        BotCommand(command='add_regex_all', description='添加正则表达式到所有规则'),
+        BotCommand(command='list_keyword', description='列出所有关键字'),
+        BotCommand(command='remove_keyword', description='删除关键字'),
+        BotCommand(command='remove_keyword_by_id', description='按ID删除关键字'),
+        BotCommand(command='remove_all_keyword', description='删除当前频道绑定的所有规则的指定关键字'),
         # 替换规则管理
-        BotCommand(
-            command='replace',
-            description='添加替换规则'
-        ),
-        BotCommand(
-            command='replace_all',
-            description='添加替换规则到所有规则'
-        ),
-        BotCommand(
-            command='list_replace',
-            description='列出所有替换规则'
-        ),
-        BotCommand(
-            command='remove_replace',
-            description='删除替换规则'
-        ),
+        BotCommand(command='replace', description='添加替换规则'),
+        BotCommand(command='replace_all', description='添加替换规则到所有规则'),
+        BotCommand(command='list_replace', description='列出所有替换规则'),
+        BotCommand(command='remove_replace', description='删除替换规则'),
         # 导入导出功能
-        BotCommand(
-            command='export_keyword',
-            description='导出当前规则的关键字'
-        ),
-        BotCommand(
-            command='export_replace',
-            description='导出当前规则的替换规则'
-        ),
-        BotCommand(
-            command='import_keyword',
-            description='导入普通关键字'
-        ),
-        BotCommand(
-            command='import_regex_keyword',
-            description='导入正则表达式关键字'
-        ),
-        BotCommand(
-            command='import_replace',
-            description='导入替换规则'
-        ),
+        BotCommand(command='export_keyword', description='导出当前规则的关键字'),
+        BotCommand(command='export_replace', description='导出当前规则的替换规则'),
+        BotCommand(command='import_keyword', description='导入普通关键字'),
+        BotCommand(command='import_regex_keyword', description='导入正则表达式关键字'),
+        BotCommand(command='import_replace', description='导入替换规则'),
         # UFB相关功能
-        BotCommand(
-            command='ufb_bind',
-            description='绑定ufb域名'
-        ),
-        BotCommand(
-            command='ufb_unbind',
-            description='解绑ufb域名'
-        ),
-        BotCommand(
-            command='ufb_item_change',
-            description='切换ufb同步配置类型'
-        ),
-        BotCommand(
-            command='clear_all_keywords',
-            description='清除当前规则的所有关键字'
-        ),
-        BotCommand(
-            command='clear_all_keywords_regex',
-            description='清除当前规则的所有正则关键字'
-        ),
-        BotCommand(
-            command='clear_all_replace',
-            description='清除当前规则的所有替换规则'
-        ),
-        BotCommand(
-            command='copy_keywords',
-            description='复制参数规则的关键字到当前规则'
-        ),
-        BotCommand(
-            command='copy_keywords_regex',
-            description='复制参数规则的正则关键字到当前规则'
-        ),
-        BotCommand(
-            command='copy_replace',
-            description='复制参数规则的替换规则到当前规则'
-        ),
-        BotCommand(
-            command='copy_rule',
-            description='复制参数规则到当前规则'
-        ),
-        BotCommand(
-            command='changelog',
-            description='查看更新日志'
-        ),
-        BotCommand(
-            command='list_rule',
-            description='列出所有转发规则'
-        ),
-        BotCommand(
-            command='delete_rule',
-            description='删除转发规则'
-        ),
-        BotCommand(
-            command='delete_rss_user',
-            description='删除RSS用户'
-        ),
-
-
-        # BotCommand(
-        #     command='clear_all',
-        #     description='慎用！清空所有数据'
-        # ),
+        BotCommand(command='ufb_bind', description='绑定ufb域名'),
+        BotCommand(command='ufb_unbind', description='解绑ufb域名'),
+        BotCommand(command='ufb_item_change', description='切换ufb同步配置类型'),
+        BotCommand(command='clear_all_keywords', description='清除当前规则的所有关键字'),
+        BotCommand(command='clear_all_keywords_regex', description='清除当前规则的所有正则关键字'),
+        BotCommand(command='clear_all_replace', description='清除当前规则的所有替换规则'),
+        BotCommand(command='copy_keywords', description='复制参数规则的关键字到当前规则'),
+        BotCommand(command='copy_keywords_regex', description='复制参数规则的正则关键字到当前规则'),
+        BotCommand(command='copy_replace', description='复制参数规则的替换规则到当前规则'),
+        BotCommand(command='copy_rule', description='复制参数规则到当前规则'),
+        BotCommand(command='changelog', description='查看更新日志'),
+        BotCommand(command='list_rule', description='列出所有转发规则'),
+        BotCommand(command='delete_rule', description='删除转发规则'),
+        BotCommand(command='delete_rss_user', description='删除RSS用户'),
     ]
 
     try:
         result = await bot(SetBotCommandsRequest(
             scope=types.BotCommandScopeDefault(),
-            lang_code='',  # 空字符串表示默认语言
+            lang_code='',
             commands=commands
         ))
         if result:
-            logger.info('已成功注册机器人命令')
+            logger.info('✅ 已成功注册机器人命令')
         else:
-            logger.error('注册机器人命令失败')
+            logger.error('❌ 注册机器人命令失败')
     except Exception as e:
-        logger.error(f'注册机器人命令时出错: {str(e)}')
+        logger.error(f'⚠️ 注册机器人命令时出错: {str(e)}')
 
 
 if __name__ == '__main__':
@@ -343,6 +241,6 @@ if __name__ == '__main__':
     try:
         loop.run_until_complete(start_clients())
     except KeyboardInterrupt:
-        print("正在关闭客户端...")
+        logger.info("🛑 正在关闭客户端...")
     finally:
         loop.close()
